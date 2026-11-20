@@ -1,0 +1,667 @@
+-- MM2 Interfaz Principal + Visuales + Combate (Aimbot y Autopredicción por Studs)
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Limpieza previa si se re-ejecuta el script
+local existingGui = PlayerGui:FindFirstChild("MM2_VisualHub")
+if existingGui then
+	existingGui:Destroy()
+end
+
+local PALETTE = {
+	BgMain      = Color3.fromRGB(20, 22, 32),
+	BgCard      = Color3.fromRGB(30, 34, 48),
+	BgSubPanel  = Color3.fromRGB(25, 28, 40),
+	Accent      = Color3.fromRGB(165, 205, 255), -- Azul pastel suave
+	Lilac       = Color3.fromRGB(198, 175, 255), -- Lila pastel
+	Text        = Color3.fromRGB(242, 245, 255),
+	TextMuted   = Color3.fromRGB(165, 173, 198),
+	CloseRed    = Color3.fromRGB(225, 78, 98),
+	CombatCol   = Color3.fromRGB(255, 135, 165), -- Rosa/coral suave
+	PredictCol  = Color3.fromRGB(175, 235, 255), -- Celeste para predicción
+	-- Colores de visuales
+	InnocentCol = Color3.fromRGB(80, 225, 120),  -- Verde
+	SheriffCol  = Color3.fromRGB(70, 155, 255),  -- Azul
+	MurdererCol = Color3.fromRGB(245, 65, 85),   -- Rojo
+	HeroCol     = Color3.fromRGB(250, 215, 70),  -- Amarillo
+	GunDropCol  = Color3.fromRGB(70, 155, 255),  -- Azul en tiempo real
+}
+
+local MIN_SIZE = Vector2.new(275, 240)
+local MAX_SIZE = Vector2.new(560, 560)
+
+local state = {
+	Open = true,
+	VisualsMenuOpen = false,
+	CombatMenuOpen = true,
+
+	-- Visuales
+	InnocentEsp = false,
+	SheriffEsp = false,
+	MurdererEsp = false,
+	HeroEsp = false,
+	GunEsp = false,
+
+	-- Combate
+	AimbotEnabled = false,
+	AutoPredictionEnabled = false,
+	BulletSpeed = 260,      -- Velocidad base en studs/seg (ajustable según distancia)
+	PingCompensation = 0.05,-- Margen extra por latencia de red
+
+	-- Estado de ronda
+	MurdererEliminated = false,
+	OriginalSheriff = nil :: Player?,
+	HeroPlayer = nil :: Player?,
+}
+
+local connections: {RBXScriptConnection} = {}
+local playerHighlights: {[Player]: Highlight} = {}
+local gunHighlight: Highlight? = nil
+
+local function trackConn(conn: RBXScriptConnection)
+	table.insert(connections, conn)
+	return conn
+end
+
+-- Helper para arrastrar ventanas desde la barra superior
+local function makeDraggable(dragHandle: GuiObject, targetFrame: GuiObject)
+	local dragging = false
+	local dragStart = Vector2.zero
+	local startPos = UDim2.new()
+
+	trackConn(dragHandle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = Vector2.new(input.Position.X, input.Position.Y)
+			startPos = targetFrame.Position
+		end
+	end))
+
+	trackConn(UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
+			targetFrame.Position = UDim2.new(
+				startPos.X.Scale,
+				startPos.X.Offset + delta.X,
+				startPos.Y.Scale,
+				startPos.Y.Offset + delta.Y
+			)
+		end
+	end))
+
+	trackConn(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end))
+end
+
+-- =======================
+-- CREACIÓN DE INTERFAZ
+-- =======================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "MM2_VisualHub"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = PlayerGui
+
+-- Botón flotante para abrir / cerrar la interfaz principal
+local toggleGuiBtn = Instance.new("TextButton")
+toggleGuiBtn.Name = "ToggleMainUI"
+toggleGuiBtn.Size = UDim2.fromOffset(124, 34)
+toggleGuiBtn.Position = UDim2.new(0.02, 0, 0.22, 0)
+toggleGuiBtn.BackgroundColor3 = PALETTE.BgCard
+toggleGuiBtn.BorderSizePixel = 0
+toggleGuiBtn.Font = Enum.Font.GothamBold
+toggleGuiBtn.TextSize = 12
+toggleGuiBtn.TextColor3 = PALETTE.Text
+toggleGuiBtn.Text = "Cerrar UI"
+toggleGuiBtn.Parent = screenGui
+
+Instance.new("UICorner", toggleGuiBtn).CornerRadius = UDim.new(0, 10)
+local toggleStroke = Instance.new("UIStroke", toggleGuiBtn)
+toggleStroke.Color = PALETTE.Accent
+toggleStroke.Thickness = 1.2
+toggleStroke.Transparency = 0.45
+
+-- Ventana principal redimensionable
+local mainWindow = Instance.new("Frame")
+mainWindow.Name = "MainWindow"
+mainWindow.Size = UDim2.fromOffset(330, 390)
+mainWindow.Position = UDim2.new(0.14, 0, 0.22, 0)
+mainWindow.BackgroundColor3 = PALETTE.BgMain
+mainWindow.BorderSizePixel = 0
+mainWindow.ClipsDescendants = true
+mainWindow.Parent = screenGui
+
+Instance.new("UICorner", mainWindow).CornerRadius = UDim.new(0, 14)
+local mainStroke = Instance.new("UIStroke", mainWindow)
+mainStroke.Color = PALETTE.Lilac
+mainStroke.Thickness = 1.3
+mainStroke.Transparency = 0.4
+
+-- Barra superior (arrastrable)
+local topBar = Instance.new("Frame")
+topBar.Name = "TopBar"
+topBar.Size = UDim2.new(1, 0, 0, 38)
+topBar.BackgroundColor3 = PALETTE.BgCard
+topBar.BorderSizePixel = 0
+topBar.Parent = mainWindow
+
+Instance.new("UICorner", topBar).CornerRadius = UDim.new(0, 14)
+makeDraggable(topBar, mainWindow)
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -90, 1, 0)
+titleLabel.Position = UDim2.fromOffset(12, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 13
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.TextColor3 = PALETTE.Text
+titleLabel.Text = "MM2 HUB"
+titleLabel.Parent = topBar
+
+-- Botón minimizar/ocultar rápido en barra superior
+local minimizeBtn = Instance.new("TextButton")
+minimizeBtn.Size = UDim2.fromOffset(26, 26)
+minimizeBtn.Position = UDim2.new(1, -64, 0.5, -13)
+minimizeBtn.BackgroundColor3 = PALETTE.BgSubPanel
+minimizeBtn.BorderSizePixel = 0
+minimizeBtn.Font = Enum.Font.GothamBold
+minimizeBtn.TextSize = 13
+minimizeBtn.TextColor3 = PALETTE.Accent
+minimizeBtn.Text = "-"
+minimizeBtn.Parent = topBar
+Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 7)
+
+-- Botón cerrar script por completo
+local killScriptBtn = Instance.new("TextButton")
+killScriptBtn.Name = "KillScriptButton"
+killScriptBtn.Size = UDim2.fromOffset(26, 26)
+killScriptBtn.Position = UDim2.new(1, -33, 0.5, -13)
+killScriptBtn.BackgroundColor3 = PALETTE.CloseRed
+killScriptBtn.BorderSizePixel = 0
+killScriptBtn.Font = Enum.Font.GothamBold
+killScriptBtn.TextSize = 12
+killScriptBtn.TextColor3 = Color3.new(1, 1, 1)
+killScriptBtn.Text = "X"
+killScriptBtn.Parent = topBar
+Instance.new("UICorner", killScriptBtn).CornerRadius = UDim.new(0, 7)
+
+-- Contenedor desplazable interno
+local contentScroll = Instance.new("ScrollingFrame")
+contentScroll.Name = "ContentScroll"
+contentScroll.Size = UDim2.new(1, -16, 1, -56)
+contentScroll.Position = UDim2.fromOffset(8, 44)
+contentScroll.BackgroundTransparency = 1
+contentScroll.BorderSizePixel = 0
+contentScroll.ScrollBarThickness = 4
+contentScroll.ScrollBarImageColor3 = PALETTE.Accent
+contentScroll.CanvasSize = UDim2.fromOffset(0, 0)
+contentScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+contentScroll.Parent = mainWindow
+
+local listLayout = Instance.new("UIListLayout", contentScroll)
+listLayout.Padding = UDim.new(0, 8)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Creador de filas toggle reutilizable
+local function createToggleRow(parent: GuiObject, order: number, label: string, badgeColor: Color3, getActive: () -> boolean, setActive: (boolean) -> ())
+	local row = Instance.new("TextButton")
+	row.Name = "Toggle_" .. label
+	row.LayoutOrder = order
+	row.Size = UDim2.new(1, 0, 0, 32)
+	row.BackgroundColor3 = PALETTE.BgCard
+	row.BorderSizePixel = 0
+	row.Text = ""
+	row.AutoButtonColor = false
+	row.Parent = parent
+	Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+
+	local swatch = Instance.new("Frame")
+	swatch.Size = UDim2.fromOffset(12, 12)
+	swatch.Position = UDim2.new(0, 10, 0.5, -6)
+	swatch.BackgroundColor3 = badgeColor
+	swatch.BorderSizePixel = 0
+	swatch.Parent = row
+	Instance.new("UICorner", swatch).CornerRadius = UDim.new(1, 0)
+
+	local nameLbl = Instance.new("TextLabel")
+	nameLbl.Size = UDim2.new(1, -90, 1, 0)
+	nameLbl.Position = UDim2.fromOffset(28, 0)
+	nameLbl.BackgroundTransparency = 1
+	nameLbl.Font = Enum.Font.GothamSemibold
+	nameLbl.TextSize = 12
+	nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+	nameLbl.TextColor3 = PALETTE.Text
+	nameLbl.Text = label
+	nameLbl.Parent = row
+
+	local statusLbl = Instance.new("TextLabel")
+	statusLbl.Size = UDim2.fromOffset(52, 20)
+	statusLbl.Position = UDim2.new(1, -60, 0.5, -10)
+	statusLbl.BackgroundColor3 = PALETTE.BgSubPanel
+	statusLbl.BorderSizePixel = 0
+	statusLbl.Font = Enum.Font.GothamBold
+	statusLbl.TextSize = 11
+	statusLbl.TextColor3 = PALETTE.TextMuted
+	statusLbl.Parent = row
+	Instance.new("UICorner", statusLbl).CornerRadius = UDim.new(0, 6)
+
+	local function refreshVisual()
+		local active = getActive()
+		statusLbl.Text = active and "ON" or "OFF"
+		statusLbl.TextColor3 = active and badgeColor or PALETTE.TextMuted
+		TweenService:Create(row, TweenInfo.new(0.15), {
+			BackgroundColor3 = active and Color3.fromRGB(40, 46, 66) or PALETTE.BgCard
+		}):Play()
+	end
+
+	refreshVisual()
+
+	trackConn(row.MouseButton1Click:Connect(function()
+		setActive(not getActive())
+		refreshVisual()
+	end))
+end
+
+-- =======================
+-- SECCIÓN VISUALES
+-- =======================
+local visualsSectionBtn = Instance.new("TextButton")
+visualsSectionBtn.Name = "VisualsMainButton"
+visualsSectionBtn.LayoutOrder = 1
+visualsSectionBtn.Size = UDim2.new(1, 0, 0, 36)
+visualsSectionBtn.BackgroundColor3 = PALETTE.BgCard
+visualsSectionBtn.BorderSizePixel = 0
+visualsSectionBtn.Font = Enum.Font.GothamBold
+visualsSectionBtn.TextSize = 13
+visualsSectionBtn.TextColor3 = PALETTE.Accent
+visualsSectionBtn.Text = "Visuales  ▸"
+visualsSectionBtn.Parent = contentScroll
+Instance.new("UICorner", visualsSectionBtn).CornerRadius = UDim.new(0, 10)
+
+local visualsSubPanel = Instance.new("Frame")
+visualsSubPanel.Name = "VisualsSubPanel"
+visualsSubPanel.LayoutOrder = 2
+visualsSubPanel.Size = UDim2.new(1, 0, 0, 216)
+visualsSubPanel.BackgroundColor3 = PALETTE.BgSubPanel
+visualsSubPanel.BorderSizePixel = 0
+visualsSubPanel.Visible = state.VisualsMenuOpen
+visualsSubPanel.Parent = contentScroll
+Instance.new("UICorner", visualsSubPanel).CornerRadius = UDim.new(0, 10)
+
+local subStroke = Instance.new("UIStroke", visualsSubPanel)
+subStroke.Color = PALETTE.Accent
+subStroke.Thickness = 1
+subStroke.Transparency = 0.65
+
+local subList = Instance.new("UIListLayout", visualsSubPanel)
+subList.Padding = UDim.new(0, 6)
+subList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+subList.SortOrder = Enum.SortOrder.LayoutOrder
+
+local subPadding = Instance.new("UIPadding", visualsSubPanel)
+subPadding.PaddingTop = UDim.new(0, 8)
+subPadding.PaddingBottom = UDim.new(0, 8)
+subPadding.PaddingLeft = UDim.new(0, 8)
+subPadding.PaddingRight = UDim.new(0, 8)
+
+createToggleRow(visualsSubPanel, 1, "Visual de los inocentes", PALETTE.InnocentCol, function() return state.InnocentEsp end, function(v) state.InnocentEsp = v end)
+createToggleRow(visualsSubPanel, 2, "Visual del sheriff", PALETTE.SheriffCol, function() return state.SheriffEsp end, function(v) state.SheriffEsp = v end)
+createToggleRow(visualsSubPanel, 3, "Visual de asesino", PALETTE.MurdererCol, function() return state.MurdererEsp end, function(v) state.MurdererEsp = v end)
+createToggleRow(visualsSubPanel, 4, "Visual del héroe", PALETTE.HeroCol, function() return state.HeroEsp end, function(v) state.HeroEsp = v end)
+createToggleRow(visualsSubPanel, 5, "Visual de la pistola", PALETTE.GunDropCol, function() return state.GunEsp end, function(v) state.GunEsp = v end)
+
+-- =======================
+-- SECCIÓN COMBATE
+-- =======================
+local combatSectionBtn = Instance.new("TextButton")
+combatSectionBtn.Name = "CombatMainButton"
+combatSectionBtn.LayoutOrder = 3
+combatSectionBtn.Size = UDim2.new(1, 0, 0, 36)
+combatSectionBtn.BackgroundColor3 = PALETTE.BgCard
+combatSectionBtn.BorderSizePixel = 0
+combatSectionBtn.Font = Enum.Font.GothamBold
+combatSectionBtn.TextSize = 13
+combatSectionBtn.TextColor3 = PALETTE.CombatCol
+combatSectionBtn.Text = "Combate  ▾"
+combatSectionBtn.Parent = contentScroll
+Instance.new("UICorner", combatSectionBtn).CornerRadius = UDim.new(0, 10)
+
+local combatSubPanel = Instance.new("Frame")
+combatSubPanel.Name = "CombatSubPanel"
+combatSubPanel.LayoutOrder = 4
+combatSubPanel.Size = UDim2.new(1, 0, 0, 118)
+combatSubPanel.BackgroundColor3 = PALETTE.BgSubPanel
+combatSubPanel.BorderSizePixel = 0
+combatSubPanel.Visible = state.CombatMenuOpen
+combatSubPanel.Parent = contentScroll
+Instance.new("UICorner", combatSubPanel).CornerRadius = UDim.new(0, 10)
+
+local combatStroke = Instance.new("UIStroke", combatSubPanel)
+combatStroke.Color = PALETTE.CombatCol
+combatStroke.Thickness = 1
+combatStroke.Transparency = 0.65
+
+local combatList = Instance.new("UIListLayout", combatSubPanel)
+combatList.Padding = UDim.new(0, 6)
+combatList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+combatList.SortOrder = Enum.SortOrder.LayoutOrder
+
+local combatPadding = Instance.new("UIPadding", combatSubPanel)
+combatPadding.PaddingTop = UDim.new(0, 8)
+combatPadding.PaddingBottom = UDim.new(0, 8)
+combatPadding.PaddingLeft = UDim.new(0, 8)
+combatPadding.PaddingRight = UDim.new(0, 8)
+
+-- Botón 1: Aimbot
+createToggleRow(combatSubPanel, 1, "Aimbot", PALETTE.MurdererCol, function() return state.AimbotEnabled end, function(v) state.AimbotEnabled = v end)
+-- Botón 2 (debajo de Aimbot): Autopredicción
+createToggleRow(combatSubPanel, 2, "Autopredicción", PALETTE.PredictCol, function() return state.AutoPredictionEnabled end, function(v) state.AutoPredictionEnabled = v end)
+
+-- Indicador en vivo de distancia en studs y tiempo de predicción
+local distanceInfoLabel = Instance.new("TextLabel")
+distanceInfoLabel.Name = "DistancePredictInfo"
+distanceInfoLabel.LayoutOrder = 3
+distanceInfoLabel.Size = UDim2.new(1, 0, 0, 22)
+distanceInfoLabel.BackgroundTransparency = 1
+distanceInfoLabel.Font = Enum.Font.GothamMedium
+distanceInfoLabel.TextSize = 11
+distanceInfoLabel.TextColor3 = PALETTE.TextMuted
+distanceInfoLabel.Text = "Asesino: -- studs | Predicción: OFF"
+distanceInfoLabel.Parent = combatSubPanel
+
+-- Handle de esquina inferior derecha para redimensionar
+local resizeHandle = Instance.new("TextButton")
+resizeHandle.Name = "ResizeCorner"
+resizeHandle.Size = UDim2.fromOffset(18, 18)
+resizeHandle.Position = UDim2.new(1, -18, 1, -18)
+resizeHandle.BackgroundColor3 = PALETTE.Accent
+resizeHandle.BackgroundTransparency = 0.25
+resizeHandle.BorderSizePixel = 0
+resizeHandle.Font = Enum.Font.GothamBold
+resizeHandle.TextSize = 11
+resizeHandle.TextColor3 = PALETTE.BgMain
+resizeHandle.Text = "◢"
+resizeHandle.Parent = mainWindow
+Instance.new("UICorner", resizeHandle).CornerRadius = UDim.new(0, 5)
+
+local resizing = false
+local resizeStartPos = Vector2.zero
+local resizeStartSize = Vector2.zero
+
+trackConn(resizeHandle.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		resizing = true
+		resizeStartPos = Vector2.new(input.Position.X, input.Position.Y)
+		resizeStartSize = mainWindow.AbsoluteSize
+	end
+end))
+
+trackConn(UserInputService.InputChanged:Connect(function(input)
+	if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		local delta = Vector2.new(input.Position.X, input.Position.Y) - resizeStartPos
+		local newW = math.clamp(resizeStartSize.X + delta.X, MIN_SIZE.X, MAX_SIZE.X)
+		local newH = math.clamp(resizeStartSize.Y + delta.Y, MIN_SIZE.Y, MAX_SIZE.Y)
+		mainWindow.Size = UDim2.fromOffset(newW, newH)
+	end
+end))
+
+trackConn(UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		resizing = false
+	end
+end))
+
+-- =======================
+-- LÓGICA DE ROLES, VISUALES Y COMBATE CON PREDICCIÓN
+-- =======================
+local function playerHasTool(player: Player, toolName: string): boolean
+	local char = player.Character
+	local bp = player:FindFirstChildOfClass("Backpack")
+	return (char and char:FindFirstChild(toolName) ~= nil) or (bp and bp:FindFirstChild(toolName) ~= nil)
+end
+
+local function findDroppedGun(): Instance?
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		if (obj:IsA("BasePart") or obj:IsA("Model")) and (obj.Name == "GunDrop" or obj.Name == "DroppedGun") then
+			return obj
+		end
+	end
+	return nil
+end
+
+local function getCurrentMurderer(): Player?
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LocalPlayer and playerHasTool(plr, "Knife") then
+			local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+			if hum and hum.Health > 0 then
+				return plr
+			end
+		end
+	end
+	return nil
+end
+
+local function updateRoleTracking()
+	local currentMurderer = getCurrentMurderer()
+	local currentGunHolder: Player? = nil
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if playerHasTool(plr, "Gun") or playerHasTool(plr, "Revolver") then
+			currentGunHolder = plr
+			if not state.OriginalSheriff and not state.MurdererEliminated then
+				state.OriginalSheriff = plr
+			end
+		end
+	end
+
+	if not currentMurderer and state.OriginalSheriff then
+		state.MurdererEliminated = true
+	end
+
+	if state.MurdererEliminated and currentGunHolder and currentGunHolder ~= state.OriginalSheriff then
+		state.HeroPlayer = currentGunHolder
+	end
+end
+
+local function resolvePlayerColor(player: Player): Color3?
+	if playerHasTool(player, "Knife") then
+		return state.MurdererEsp and PALETTE.MurdererCol or nil
+	end
+
+	if state.HeroEsp and state.HeroPlayer == player and (playerHasTool(player, "Gun") or playerHasTool(player, "Revolver")) then
+		return PALETTE.HeroCol
+	end
+
+	if playerHasTool(player, "Gun") or playerHasTool(player, "Revolver") then
+		return state.SheriffEsp and PALETTE.SheriffCol or nil
+	end
+
+	return state.InnocentEsp and PALETTE.InnocentCol or nil
+end
+
+local function refreshPlayerHighlight(player: Player)
+	if player == LocalPlayer then return end
+
+	local char = player.Character
+	local color = resolvePlayerColor(player)
+
+	if not char or not color then
+		if playerHighlights[player] then
+			playerHighlights[player]:Destroy()
+			playerHighlights[player] = nil
+		end
+		return
+	end
+
+	local hl = playerHighlights[player]
+	if not hl then
+		hl = Instance.new("Highlight")
+		hl.Name = "MM2_Role_HL"
+		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		hl.FillTransparency = 0.5
+		hl.OutlineTransparency = 0.05
+		hl.Parent = char
+		playerHighlights[player] = hl
+	else
+		hl.Adornee = char
+		hl.Parent = char
+	end
+
+	hl.FillColor = color
+	hl.OutlineColor = color
+end
+
+local function refreshGunHighlight()
+	local gun = findDroppedGun()
+	if not state.GunEsp or not gun then
+		if gunHighlight then
+			gunHighlight:Destroy()
+			gunHighlight = nil
+		end
+		return
+	end
+
+	if not gunHighlight then
+		gunHighlight = Instance.new("Highlight")
+		gunHighlight.Name = "MM2_GunDrop_HL"
+		gunHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		gunHighlight.FillTransparency = 0.4
+		gunHighlight.OutlineTransparency = 0.05
+		gunHighlight.Parent = gun
+	else
+		gunHighlight.Adornee = gun
+		gunHighlight.Parent = gun
+	end
+
+	gunHighlight.FillColor = PALETTE.GunDropCol
+	gunHighlight.OutlineColor = PALETTE.GunDropCol
+end
+
+-- Cálculo de posición predicha en base a distancia en studs y velocidad del asesino
+local function getPredictedMurdererPosition(targetRoot: BasePart, originPos: Vector3): (Vector3, number, number)
+	local distanceStuds = (targetRoot.Position - originPos).Magnitude
+
+	if not state.AutoPredictionEnabled then
+		return targetRoot.Position, distanceStuds, 0
+	end
+
+	-- Tiempo de viaje del proyectil = (distancia en studs / velocidad bala) + compensación
+	local travelTime = (distanceStuds / state.BulletSpeed) + state.PingCompensation
+	local velocity = targetRoot.AssemblyLinearVelocity
+
+	-- Evitamos exagerar el eje Y si solo está saltando ligeramente, manteniendo predicción horizontal precisa
+	local predictedVelocity = Vector3.new(velocity.X, velocity.Y * 0.45, velocity.Z)
+	local predictedPos = targetRoot.Position + (predictedVelocity * travelTime)
+
+	return predictedPos, distanceStuds, travelTime
+end
+
+local function updateCombat()
+	local murderer = getCurrentMurderer()
+	local targetChar = murderer and murderer.Character
+	local targetRoot = targetChar and (targetChar:FindFirstChild("HumanoidRootPart") or targetChar:FindFirstChild("UpperTorso")) :: BasePart?
+	local myChar = LocalPlayer.Character
+	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local camera = Workspace.CurrentCamera
+
+	if not targetRoot or not myRoot or not camera then
+		distanceInfoLabel.Text = "Asesino: no detectado"
+		return
+	end
+
+	local aimPosition, distStuds, leadTime = getPredictedMurdererPosition(targetRoot, myRoot.Position)
+
+	if state.AutoPredictionEnabled then
+		distanceInfoLabel.Text = string.format("Asesino: %.1f studs | Lead: +%.2fs", distStuds, leadTime)
+	else
+		distanceInfoLabel.Text = string.format("Asesino: %.1f studs | Predicción: OFF", distStuds)
+	end
+
+	if state.AimbotEnabled then
+		local camPos = camera.CFrame.Position
+		camera.CFrame = CFrame.lookAt(camPos, aimPosition)
+	end
+end
+
+-- =======================
+-- ACCIONES DE BOTONES UI
+-- =======================
+local function setMainWindowOpen(isOpen: boolean)
+	state.Open = isOpen
+	mainWindow.Visible = isOpen
+	toggleGuiBtn.Text = isOpen and "Cerrar UI" or "Abrir UI"
+end
+
+trackConn(toggleGuiBtn.MouseButton1Click:Connect(function()
+	setMainWindowOpen(not state.Open)
+end))
+
+trackConn(minimizeBtn.MouseButton1Click:Connect(function()
+	setMainWindowOpen(false)
+end))
+
+trackConn(visualsSectionBtn.MouseButton1Click:Connect(function()
+	state.VisualsMenuOpen = not state.VisualsMenuOpen
+	visualsSubPanel.Visible = state.VisualsMenuOpen
+	visualsSectionBtn.Text = state.VisualsMenuOpen and "Visuales  ▾" or "Visuales  ▸"
+end))
+
+trackConn(combatSectionBtn.MouseButton1Click:Connect(function()
+	state.CombatMenuOpen = not state.CombatMenuOpen
+	combatSubPanel.Visible = state.CombatMenuOpen
+	combatSectionBtn.Text = state.CombatMenuOpen and "Combate  ▾" or "Combate  ▸"
+end))
+
+local function destroyScriptCompletely()
+	for _, conn in ipairs(connections) do
+		conn:Disconnect()
+	end
+	table.clear(connections)
+
+	for plr, hl in pairs(playerHighlights) do
+		if hl then hl:Destroy() end
+		playerHighlights[plr] = nil
+	end
+
+	if gunHighlight then
+		gunHighlight:Destroy()
+		gunHighlight = nil
+	end
+
+	screenGui:Destroy()
+end
+
+trackConn(killScriptBtn.MouseButton1Click:Connect(destroyScriptCompletely))
+
+-- Bucle principal en tiempo real
+trackConn(RunService.RenderStepped:Connect(function()
+	updateRoleTracking()
+	for _, plr in ipairs(Players:GetPlayers()) do
+		refreshPlayerHighlight(plr)
+	end
+	refreshGunHighlight()
+	updateCombat()
+end))
+
+trackConn(Players.PlayerRemoving:Connect(function(plr)
+	if playerHighlights[plr] then
+		playerHighlights[plr]:Destroy()
+		playerHighlights[plr] = nil
+	end
+	if state.HeroPlayer == plr then
+		state.HeroPlayer = nil
+	end
+	if state.OriginalSheriff == plr then
+		state.OriginalSheriff = nil
+	end
+end))
